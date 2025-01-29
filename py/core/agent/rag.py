@@ -6,8 +6,10 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any, AsyncGenerator, Callable, Optional, Tuple
 
+import openai
 import tiktoken
 from google.genai.errors import ServerError
+from openai import AzureOpenAI, OpenAI, OpenAIError
 
 from core.agent import R2RAgent, R2RStreamingAgent
 from core.base import (
@@ -497,161 +499,172 @@ class R2RXMLToolsStreamingRAGAgent(R2RStreamingRAGAgent):
             f) If still no <Response>, append iteration text to context, move to next iteration.
         2) If we exhaust steps, yield fallback <Response>.
         """
-
         # Step 1) Setup conversation
         await self._setup(system_instruction=system_instruction)
         if messages:
             for msg in messages:
                 await self.conversation.add_message(msg)
 
-        # Build initial conversation context from all messages
-        all_msgs = await self.conversation.get_messages()
-        conversation_context = self._build_single_user_prompt(all_msgs)
+        async for (
+            is_thought,
+            token_text,
+        ) in self._generate_thinking_response(**kwargs):
+            print("token_text = ", token_text)
+            yield token_text
 
-        for step_i in range(self.max_steps):
-            # We'll collect final text tokens to parse for <Action>/<Response>.
-            assistant_text_buffer = []
-            # Track whether we are “inside” a <Thought> block while streaming:
-            inside_thought_block = False
+        # # Step 1) Setup conversation
+        # await self._setup(system_instruction=system_instruction)
+        # if messages:
+        #     for msg in messages:
+        #         await self.conversation.add_message(msg)
 
-            conversation_context += "\n\n[Assistant]\n"
+        # for step_i in range(self.max_steps):
+        #     # We'll collect final text tokens to parse for <Action>/<Response>.
+        #     assistant_text_buffer = []
+        #     # Track whether we are “inside” a <Thought> block while streaming:
+        #     inside_thought_block = False
 
-            # Step 2) Single LLM call => yields (is_thought, text) pairs
-            async for (
-                is_thought,
-                token_text,
-            ) in self._generate_thinking_response(
-                conversation_context, **kwargs
-            ):
-                if is_thought:
-                    # Stream chain-of-thought text *inline*, but bracket with <Thought>...</Thought>
-                    if not inside_thought_block:
-                        inside_thought_block = True
-                        conversation_context += "<Thought>"
-                        yield "<Thought>"
-                    conversation_context += token_text
-                    yield token_text
-                else:
-                    # If we were inside a thought block, close it
-                    if inside_thought_block:
-                        conversation_context += "</Thought>"
-                        yield "</Thought>"
-                        inside_thought_block = False
+        #     conversation_context += "\n\n[Assistant]\n"
+        #     logger.info("Generating reply....")
+        #     # Step 2) Single LLM call => yields (is_thought, text) pairs
+        #     async for (
+        #         is_thought,
+        #         token_text,
+        #     ) in self._generate_thinking_response(
+        #         **kwargs
+        #     ):
+        #         print(f"thought = {is_thought}, token_text = {token_text}")
+        #         if is_thought:
+        #             # Stream chain-of-thought text *inline*, but bracket with <Thought>...</Thought>
+        #             if not inside_thought_block:
+        #                 inside_thought_block = True
+        #                 conversation_context += "<Thought>"
+        #                 yield "<Thought>"
+        #             conversation_context += token_text
+        #             yield token_text
+        #         else:
+        #             # If we were inside a thought block, close it
+        #             if inside_thought_block:
+        #                 conversation_context += "</Thought>"
+        #                 yield "</Thought>"
+        #                 inside_thought_block = False
 
-                    # “Assistant text” is user-facing text that we
-                    # will parse for <Action> or <Response>
-                    assistant_text_buffer.append(token_text)
+        #             # “Assistant text” is user-facing text that we
+        #             # will parse for <Action> or <Response>
+        #             assistant_text_buffer.append(token_text)
 
-            # If the model ended while still in a thought block, close it
-            if inside_thought_block:
-                conversation_context += "</Thought>"
-                yield "</Thought>"
+        #     # If the model ended while still in a thought block, close it
+        #     if inside_thought_block:
+        #         conversation_context += "</Thought>"
+        #         yield "</Thought>"
 
-            # Step 3) Combine the final user-facing tokens
-            iteration_text = "".join(assistant_text_buffer).strip()
+        #     # Step 3) Combine the final user-facing tokens
+        #     iteration_text = "".join(assistant_text_buffer).strip()
+        #     logger.info(f"step_i: {step_i}")
+        #     logger.info(f"Iteration text: {iteration_text}")
+        #     logger.info("-"*100)
+        #     #
+        #     # 3a) Parse out <Action> blocks
+        #     #
+        #     parsed_actions = self._parse_action_blocks(iteration_text)
 
-            #
-            # 3a) Parse out <Action> blocks
-            #
-            parsed_actions = self._parse_action_blocks(iteration_text)
+        #     pre_text = iteration_text.split("<Action>")[0]
+        #     conversation_context += pre_text
 
-            pre_text = iteration_text.split("<Action>")[0]
-            conversation_context += pre_text
+        #     if parsed_actions:
+        #         # For each action block, see if it has <ToolCalls>, <Response>
+        #         for action_block in parsed_actions:
 
-            if parsed_actions:
-                # For each action block, see if it has <ToolCalls>, <Response>
-                for action_block in parsed_actions:
+        #             # Prepare two separate <ToolCalls> blocks:
+        #             #  - "toolcalls_xml": with <Result> inside (for conversation_context)
+        #             #  - "toolcalls_minus_results": no <Result> (to show user)
+        #             toolcalls_xml = "<ToolCalls>"
+        #             toolcalls_minus_results = "<ToolCalls>"
 
-                    # Prepare two separate <ToolCalls> blocks:
-                    #  - "toolcalls_xml": with <Result> inside (for conversation_context)
-                    #  - "toolcalls_minus_results": no <Result> (to show user)
-                    toolcalls_xml = "<ToolCalls>"
-                    toolcalls_minus_results = "<ToolCalls>"
+        #             # Execute any tool calls
+        #             for tc in action_block["tool_calls"]:
+        #                 name = tc["name"]
+        #                 params = tc["params"]
+        #                 logger.info(f"Executing tool '{name}' with {params}")
 
-                    # Execute any tool calls
-                    for tc in action_block["tool_calls"]:
-                        name = tc["name"]
-                        params = tc["params"]
-                        logger.info(f"Executing tool '{name}' with {params}")
+        #                 if name == "result":
+        #                     logger.info(
+        #                         f"Returning response = {params['answer']}"
+        #                     )
+        #                     yield f"<Response>{params['answer']}</Response>"
+        #                     return
 
-                        if name == "result":
-                            logger.info(
-                                f"Returning response = {params['answer']}"
-                            )
-                            yield f"<Response>{params['answer']}</Response>"
-                            return
+        #                 # Build the <ToolCall> to show user (minus <Result>)
+        #                 minimal_toolcall = (
+        #                     f"<ToolCall>"
+        #                     f"<Name>{name}</Name>"
+        #                     f"<Parameters>{json.dumps(params)}</Parameters>"
+        #                     f"</ToolCall>"
+        #                 )
+        #                 toolcalls_minus_results += minimal_toolcall
 
-                        # Build the <ToolCall> to show user (minus <Result>)
-                        minimal_toolcall = (
-                            f"<ToolCall>"
-                            f"<Name>{name}</Name>"
-                            f"<Parameters>{json.dumps(params)}</Parameters>"
-                            f"</ToolCall>"
-                        )
-                        toolcalls_minus_results += minimal_toolcall
+        #                 # Build the <ToolCall> with results for context
+        #                 toolcall_with_result = (
+        #                     f"<ToolCall>"
+        #                     f"<Name>{name}</Name>"
+        #                     f"<Parameters>{json.dumps(params)}</Parameters>"
+        #                 )
+        #                 try:
+        #                     result = await self.execute_tool(name, **params)
 
-                        # Build the <ToolCall> with results for context
-                        toolcall_with_result = (
-                            f"<ToolCall>"
-                            f"<Name>{name}</Name>"
-                            f"<Parameters>{json.dumps(params)}</Parameters>"
-                        )
-                        try:
-                            result = await self.execute_tool(name, **params)
+        #                     context_tokens = num_tokens(str(result))
+        #                     max_to_result = (
+        #                         self.max_tool_context_length / context_tokens
+        #                     )
 
-                            context_tokens = num_tokens(str(result))
-                            max_to_result = (
-                                self.max_tool_context_length / context_tokens
-                            )
+        #                     if max_to_result < 1:
+        #                         result = (
+        #                             str(result)[
+        #                                 0 : int(max_to_result * context_tokens)
+        #                             ]
+        #                             + "... RESULT TRUNCATED DUE TO MAX LENGTH ..."
+        #                         )
+        #                 except Exception as e:
+        #                     result = f"Error executing tool '{name}': {e}"
 
-                            if max_to_result < 1:
-                                result = (
-                                    str(result)[
-                                        0 : int(max_to_result * context_tokens)
-                                    ]
-                                    + "... RESULT TRUNCATED DUE TO MAX LENGTH ..."
-                                )
-                        except Exception as e:
-                            result = f"Error executing tool '{name}': {e}"
+        #                 toolcall_with_result += (
+        #                     f"<Result>{result}</Result></ToolCall>"
+        #                 )
 
-                        toolcall_with_result += (
-                            f"<Result>{result}</Result></ToolCall>"
-                        )
+        #                 toolcalls_xml += toolcall_with_result
 
-                        toolcalls_xml += toolcall_with_result
+        #             toolcalls_xml += "</ToolCalls>"
+        #             toolcalls_minus_results += "</ToolCalls>"
 
-                    toolcalls_xml += "</ToolCalls>"
-                    toolcalls_minus_results += "</ToolCalls>"
+        #             # Yield the no-results block so user sees the calls
+        #             yield toolcalls_minus_results
 
-                    # Yield the no-results block so user sees the calls
-                    yield toolcalls_minus_results
+        #             # Otherwise, embed the <ToolCalls> with <Result> in conversation context
+        #             conversation_context += f"<Action>{toolcalls_xml}</Action>"
 
-                    # Otherwise, embed the <ToolCalls> with <Result> in conversation context
-                    conversation_context += f"<Action>{toolcalls_xml}</Action>"
+        #     else:
+        #         #
+        #         # 3b) If no <Action> blocks at all, yield the iteration text below
+        #         failed_iteration_text = "<Action><ToolCalls></ToolCalls><Response>I failed to use any tools, I should probably return a response with the `result` tool now.</Response></Action>"
+        #         context_size = num_tokens(conversation_context)
+        #         if context_size > self.max_context_window_tokens:
+        #             yield COMPUTE_FAILURE
+        #             return
 
-            else:
-                #
-                # 3b) If no <Action> blocks at all, yield the iteration text below
-                failed_iteration_text = "<Action><ToolCalls></ToolCalls><Response>I failed to use any tools, I should probably return a response with the `result` tool now.</Response></Action>"
-                context_size = num_tokens(conversation_context)
-                if context_size > self.max_context_window_tokens:
-                    yield COMPUTE_FAILURE
-                    return
+        #         yield failed_iteration_text + f"\n\n[System]\n{step_i+1} steps completed, no <Action> blocks found. {context_size} tokens in context out of {self.max_context_window_tokens} consumed."
+        #         conversation_context += failed_iteration_text
+        #         continue
 
-                yield failed_iteration_text + f"\n\n[System]\n{step_i+1} steps completed, no <Action> blocks found. {context_size} tokens in context out of {self.max_context_window_tokens} consumed."
-                conversation_context += failed_iteration_text
-                continue
-
-            post_text = iteration_text.split("</Action>")[-1]
-            conversation_context += post_text
-            context_size = num_tokens(conversation_context)
-            if context_size > self.max_context_window_tokens:
-                yield COMPUTE_FAILURE
-                return
-            conversation_context += f"\n\n[System]\n{step_i+1} steps completed. {context_size} tokens in context out of {self.max_context_window_tokens} consumed."
-        # If we finish all steps with no <Response>, yield fallback:
-        yield COMPUTE_FAILURE
-        return
+        #     post_text = iteration_text.split("</Action>")[-1]
+        #     conversation_context += post_text
+        #     context_size = num_tokens(conversation_context)
+        #     if context_size > self.max_context_window_tokens:
+        #         yield COMPUTE_FAILURE
+        #         return
+        #     conversation_context += f"\n\n[System]\n{step_i+1} steps completed. {context_size} tokens in context out of {self.max_context_window_tokens} consumed."
+        # # If we finish all steps with no <Response>, yield fallback:
+        # yield COMPUTE_FAILURE
+        # return
 
     def _parse_action_blocks(self, text: str) -> list[dict]:
         """
@@ -830,7 +843,7 @@ class R2RXMLToolsStreamingRAGAgent(R2RStreamingRAGAgent):
     # ABSTRACT METHODS – must be implemented by a subclass
     # ------------------------------------------------------------------------
     async def _generate_thinking_response(
-        self, user_prompt: str, **kwargs
+        self, **kwargs
     ) -> AsyncGenerator[tuple[bool, str], None]:
         """
         Should yield (is_thought, text) pairs from the LLM's first pass.
@@ -873,7 +886,6 @@ class GeminiXMLToolsStreamingRAGAgent(R2RXMLToolsStreamingRAGAgent):
 
     async def _generate_thinking_response(
         self,
-        user_prompt: str,
         max_retries: int = 3,
         initial_delay: float = 1.0,
         **kwargs,
@@ -897,6 +909,9 @@ class GeminiXMLToolsStreamingRAGAgent(R2RXMLToolsStreamingRAGAgent):
 
         attempt = 0
         last_error = None
+        # Build initial conversation context from all messages
+        all_msgs = await self.conversation.get_messages()
+        user_prompt = self._build_single_user_prompt(all_msgs)
 
         while attempt <= max_retries:
             try:
@@ -937,5 +952,154 @@ class GeminiXMLToolsStreamingRAGAgent(R2RXMLToolsStreamingRAGAgent):
                 else:
                     # All retries exhausted
                     error_msg = f"Failed after {max_retries} attempts. Last error: {str(last_error)}"
+                    yield (False, error_msg)
+                    return
+
+
+class DeepSeekXMLToolsStreamingRAGAgent(R2RXMLToolsStreamingRAGAgent):
+    """
+    A streaming-capable XML agent for DeepSeek's `deepseek-reasoner` model.
+
+    - Inherits from R2RXMLToolsStreamingRAGAgent to handle XML-based <Action>, <ToolCalls>, <Response>, etc.
+    - Uses DeepSeek's ChatCompletion API with stream=True.
+    - Yields chain-of-thought tokens for any partial delta in 'reasoning_content',
+      and yields user-facing tokens for any partial delta in 'content'.
+    """
+
+    def __init__(
+        self,
+        database_provider: DatabaseProvider,
+        config: AgentConfig,
+        search_settings: SearchSettings,
+        rag_generation_config: GenerationConfig,
+        local_search_method: Callable,
+        content_method: Optional[Callable] = None,
+        max_tool_context_length: int = 20_000,
+        max_steps: int = 10,
+        # deepseek_api_key: Optional[str] = None,
+        deepseek_base_url: str = "https://api.deepseek.com",
+        *args,
+        **kwargs,
+    ):
+        """
+        :param database_provider: Your DB provider
+        :param config: The AgentConfig
+        :param search_settings: Configuration for local/hybrid/graph search
+        :param rag_generation_config: Config for how we call the LLM
+        :param local_search_method: The local retrieval method (query -> AggregateSearchResult)
+        :param content_method: The method to retrieve entire documents/chunks from local DB
+        :param max_tool_context_length: Maximum tokens for tool results
+        :param max_steps: Max number of <Action> tool calls
+        :param deepseek_api_key: Your DeepSeek API key
+        :param deepseek_base_url: Typically https://api.deepseek.com
+        """
+        super().__init__(
+            database_provider=database_provider,
+            llm_provider=None,  # We won't use a built-in LLM provider here
+            config=config,
+            search_settings=search_settings,
+            rag_generation_config=rag_generation_config,
+            local_search_method=local_search_method,
+            content_method=content_method,
+            max_tool_context_length=max_tool_context_length,
+            max_steps=max_steps,
+        )
+
+        import os
+
+        # Initialize OpenAI client for DeepSeek.
+        # You can override this if you have a different pattern for setting the API key.
+        # if not deepseek_api_key:
+        #     raise ValueError(
+        #         "Missing DeepSeek API key. Please provide one via `deepseek_api_key`."
+        #     )
+        # Create the client—use openai-like usage:
+        # self._client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url=deepseek_base_url)
+        # self._client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key="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")
+        # self._client = OpenAI(base_url="https://api.together.xyz/v1", api_key="9cb3e0c48d9412890a81871625ce2d9e68b422932268935a3158a018dba8232e")
+        self._client = AzureOpenAI(
+            azure_endpoint=os.getenv("AZURE_API_BASE"),
+            api_key=os.getenv("AZURE_API_KEY"),
+            api_version=os.getenv("AZURE_API_VERSION"),
+        )
+
+    async def _generate_thinking_response(
+        self,
+        max_retries: int = 3,
+        initial_delay: float = 1.0,
+        **kwargs,
+    ) -> AsyncGenerator[tuple[bool, str], None]:
+        """
+        Streams a completion from DeepSeek's `deepseek-reasoner`.
+
+        Yields (is_thought, text):
+          - `is_thought=True` for chain-of-thought tokens in `reasoning_content`
+          - `is_thought=False` for normal user-facing tokens in `content`
+        """
+
+        messages = await self.conversation.get_messages()
+        # messages = [{'role': 'user', 'content': 'How would i build my own open source laptop?'}]
+        # messages=[
+        #     {"role": "system", "content": "You are a helpful assistant"},
+        #     {"role": "user", "content": " How many Rs are there in the word 'strawberry'?"},
+        # ]
+
+        # We remove any advanced settings (like temperature, top_p, etc.)
+        # because deepseek-reasoner does not support them or they have no effect.
+
+        request_args = {
+            # "model": "deepseek-reasoner",
+            # "model": "deepseek/deepseek-r1",
+            # "model": "deepseek-ai/DeepSeek-R1",
+            "model": "o1",
+            "messages": messages,
+            # "stream": True,
+            # If you want to adjust max tokens for final content, do so:
+            # "max_tokens": rag_generation_config.max_tokens or 2048
+        }
+
+        attempt = 0
+        last_error = None
+
+        while attempt <= max_retries:
+            try:
+                # Create the streaming completion request
+                print("request_args = ", request_args)
+                print("requesting....")
+                response = self._client.chat.completions.create(**request_args)
+                print("response = ", response)
+
+                # For each chunk, check if there's reasoning_content or content
+                for chunk in response:
+                    delta = chunk.choices[0].delta
+                    print("delta = ", delta)
+                    yield (True, delta.content)
+                    continue
+                    # If we have chain-of-thought tokens:
+                    if delta.reasoning_content:
+                        yield (True, delta.reasoning_content)
+                    # If we have final user-facing tokens:
+                    if delta.content:
+                        yield (False, delta.content)
+
+                # If streaming ends gracefully, return
+                return
+
+            except OpenAIError as e:
+                last_error = e
+                attempt += 1
+                if attempt <= max_retries:
+                    # Exponential backoff
+                    delay = initial_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"[DeepSeekXMLToolsStreamingRAGAgent] Retrying on error: {e}. "
+                        f"Retry {attempt}/{max_retries} in {delay:.1f} seconds."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    error_msg = (
+                        f"DeepSeek streaming failed after {max_retries} attempts. "
+                        f"Last error: {last_error}"
+                    )
                     yield (False, error_msg)
                     return

@@ -13,7 +13,10 @@ from core import (  # R2RXMLToolsStreamingRAGAgent,
     R2RRAGAgent,
     R2RStreamingRAGAgent,
 )
-from core.agent.rag import GeminiXMLToolsStreamingRAGAgent
+from core.agent.rag import (
+    DeepSeekXMLToolsStreamingRAGAgent,
+    GeminiXMLToolsStreamingRAGAgent,
+)
 from core.base import (
     AggregateSearchResult,
     ChunkSearchResult,
@@ -44,6 +47,12 @@ logger = logging.getLogger()
 
 
 import tiktoken
+
+THINKING_MODELS = [
+    "gemini-2.0-flash-thinking-exp-01-21",
+    "deepseek-reasoner",
+    "o1",
+]
 
 
 def tokens_count_for_message(message, encoding):
@@ -715,6 +724,14 @@ class RetrievalService(Service):
             logger.info(
                 f"Running the agent with conversation_id = {conversation_id} and message = {current_message}"
             )
+            print(
+                "any(thinking_pattern in rag_generation_config.model for thinking_pattern in THINKING_MODELS) = ",
+                any(
+                    thinking_pattern in rag_generation_config.model
+                    for thinking_pattern in THINKING_MODELS
+                ),
+            )
+
             # Save the new message to the conversation
             parent_id = ids[-1] if ids else None
             message_response = await self.providers.database.conversations_handler.add_message(
@@ -762,19 +779,54 @@ class RetrievalService(Service):
 
                 async def stream_response():
                     try:
-                        if "gemini" not in rag_generation_config.model:
-                            agent = R2RStreamingRAGAgent(
-                                database_provider=self.providers.database,
-                                llm_provider=self.providers.llm,
-                                config=agent_config,
-                                search_settings=search_settings,
-                                rag_generation_config=rag_generation_config,
-                                max_tool_context_length=max_tool_context_length,
-                                local_search_method=self.search,
-                                content_method=self.get_context,
+                        print(
+                            "any(thinking_pattern in rag_generation_config.model for thinking_pattern in THINKING_MODELS) = ",
+                            any(
+                                thinking_pattern in rag_generation_config.model
+                                for thinking_pattern in THINKING_MODELS
+                            ),
+                        )
+                        if any(
+                            thinking_pattern in rag_generation_config.model
+                            for thinking_pattern in THINKING_MODELS
+                        ):
+                            logger.info(
+                                f"Loading reasoning agent with model {rag_generation_config.model} for streaming"
                             )
+                            if "gemini" in rag_generation_config.model:
+                                agent = GeminiXMLToolsStreamingRAGAgent(
+                                    database_provider=self.providers.database,
+                                    llm_provider=self.providers.llm,
+                                    config=agent_config,
+                                    search_settings=search_settings,
+                                    rag_generation_config=rag_generation_config,
+                                    max_tool_context_length=max_tool_context_length,
+                                    local_search_method=self.search,
+                                    content_method=self.get_context,
+                                )
+                            elif (
+                                "deepseek" in rag_generation_config.model
+                                or "azure" in rag_generation_config.model
+                            ):
+                                print("-" * 1000)
+                                agent = DeepSeekXMLToolsStreamingRAGAgent(
+                                    database_provider=self.providers.database,
+                                    llm_provider=self.providers.llm,
+                                    config=agent_config,
+                                    search_settings=search_settings,
+                                    rag_generation_config=rag_generation_config,
+                                    max_tool_context_length=max_tool_context_length,
+                                    local_search_method=self.search,
+                                    content_method=self.get_context,
+                                )
+                            else:
+                                raise R2RException(
+                                    status_code=400,
+                                    message=f"Provider not found for the given model {rag_generation_config.model}",
+                                )
                         else:
-                            agent = GeminiXMLToolsStreamingRAGAgent(
+                            raise R2RException("Model not found")
+                            agent = R2RStreamingRAGAgent(
                                 database_provider=self.providers.database,
                                 llm_provider=self.providers.llm,
                                 config=agent_config,
