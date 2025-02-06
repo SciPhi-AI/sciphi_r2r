@@ -15,6 +15,7 @@ from .embeddings import (
     LiteLLMEmbeddingProvider,
     OllamaEmbeddingProvider,
     OpenAIEmbeddingProvider,
+    R2REmbeddingProvider,
 )
 from .ingestion import (  # type: ignore
     R2RIngestionConfig,

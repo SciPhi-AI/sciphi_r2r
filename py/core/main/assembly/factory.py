@@ -37,6 +37,7 @@ from core.providers import (
     PostgresDatabaseProvider,
     R2RAuthProvider,
     R2RCompletionProvider,
+    R2REmbeddingProvider,
     R2RIngestionConfig,
     R2RIngestionProvider,
     SendGridEmailProvider,
@@ -195,29 +196,23 @@ class R2RProviderFactory:
     def create_embedding_provider(
         embedding: EmbeddingConfig, *args, **kwargs
     ) -> (
-        LiteLLMEmbeddingProvider
+        R2REmbeddingProvider
+        | LiteLLMEmbeddingProvider
         | OllamaEmbeddingProvider
         | OpenAIEmbeddingProvider
     ):
         embedding_provider: Optional[EmbeddingProvider] = None
 
-        if embedding.provider == "openai":
-            if not os.getenv("OPENAI_API_KEY"):
-                raise ValueError(
-                    "Must set OPENAI_API_KEY in order to initialize OpenAIEmbeddingProvider."
-                )
-            from core.providers import OpenAIEmbeddingProvider
+        if embedding.provider == "r2r":
+            return R2REmbeddingProvider(embedding)
 
+        elif embedding.provider == "openai":
             embedding_provider = OpenAIEmbeddingProvider(embedding)
 
         elif embedding.provider == "litellm":
-            from core.providers import LiteLLMEmbeddingProvider
-
             embedding_provider = LiteLLMEmbeddingProvider(embedding)
 
         elif embedding.provider == "ollama":
-            from core.providers import OllamaEmbeddingProvider
-
             embedding_provider = OllamaEmbeddingProvider(embedding)
 
         else:
@@ -310,25 +305,10 @@ class R2RProviderFactory:
         *args,
         **kwargs,
     ) -> R2RProviders:
-        if (
-            self.config.embedding.base_dimension
-            != self.config.completion_embedding.base_dimension
-        ):
-            raise ValueError(
-                f"Both embedding configurations must use the same dimensions. Got {self.config.embedding.base_dimension} and {self.config.completion_embedding.base_dimension}"
-            )
-
         embedding_provider = (
             embedding_provider_override
             or self.create_embedding_provider(
                 self.config.embedding, *args, **kwargs
-            )
-        )
-
-        completion_embedding_provider = (
-            embedding_provider_override
-            or self.create_embedding_provider(
-                self.config.completion_embedding, *args, **kwargs
             )
         )
 
@@ -387,7 +367,6 @@ class R2RProviderFactory:
             auth=auth_provider,
             database=database_provider,
             embedding=embedding_provider,
-            completion_embedding=completion_embedding_provider,
             ingestion=ingestion_provider,
             llm=llm_provider,
             email=email_provider,

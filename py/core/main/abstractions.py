@@ -17,6 +17,7 @@ from core.providers import (
     PostgresDatabaseProvider,
     R2RAuthProvider,
     R2RCompletionProvider,
+    R2REmbeddingProvider,
     R2RIngestionProvider,
     SendGridEmailProvider,
     SimpleOrchestrationProvider,
@@ -37,15 +38,11 @@ class R2RProviders(BaseModel):
     database: PostgresDatabaseProvider
     ingestion: R2RIngestionProvider | UnstructuredIngestionProvider
     embedding: (
-        LiteLLMEmbeddingProvider
+        R2REmbeddingProvider
+        | LiteLLMEmbeddingProvider
         | OpenAIEmbeddingProvider
         | OllamaEmbeddingProvider
     )
-    completion_embedding: (
-        LiteLLMEmbeddingProvider
-        | OpenAIEmbeddingProvider
-        | OllamaEmbeddingProvider
-    ) | None = None
     llm: (
         AnthropicCompletionProvider
         | LiteLLMCompletionProvider
